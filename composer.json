@@ -1,5 +1,5 @@
 {
-    "name": "maxka/whatsapp-stream-encryption",
+    "name": "maximchik-max/whatsapp-stream-encryption",
     "version": "1.0.0",
     "description": "PSR-7 stream decorators for WhatsApp encryption/decryption",
     "require": {
