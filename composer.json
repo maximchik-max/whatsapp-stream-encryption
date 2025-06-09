@@ -1,0 +1,16 @@
+{
+    "name": "maxka/whatsapp-stream-encryption",
+    "version": "1.0.0",
+    "description": "PSR-7 stream decorators for WhatsApp encryption/decryption",
+    "require": {
+        "php": ">=8.0",
+        "psr/http-message": "^1.0",
+        "ext-openssl": "*",
+        "ext-hash": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "WhatsAppStreamEncryption\\": "src/"
+        }
+    }
+}
