@@ -4,10 +4,6 @@ namespace WhatsAppStreamEncryption;
 
 use Psr\Http\Message\StreamInterface;
 use RuntimeException;
-
-// подписать и валидировать данные стрима при промощи HMAC мы не можем, так как для этого нужны ВСЕ данные со 
-// стрима, а одно из условий - стрим мы читаем и держим в памяти БЛОКАМИ, т.е. ВСЕ данные одномоментно НЕ доступны
-// исключение - весь файл поместился в один блок при кодировании и раскодировании
     
 class EncryptionStream implements StreamInterface
 {
@@ -19,6 +15,8 @@ class EncryptionStream implements StreamInterface
     private $eof;
     private $encryptedData;
     private $curIv;
+    private $hashCtx;
+    private $lastPart;
 
     public function __construct(StreamInterface $stream, string $mediaKey, string $mediaType)
     {
@@ -29,7 +27,9 @@ class EncryptionStream implements StreamInterface
         $this->position = 0;
         $this->eof = false;
         $this->encryptedData = '';
+        $this->lastPart = '';
         $this->curIv = $this->keys['iv'];
+        $this->hashCtx = StreamHelper::initHashCtx($this->keys['macKey'], $this->keys['iv']);
     }
 
     public function __toString(): string
@@ -89,6 +89,7 @@ class EncryptionStream implements StreamInterface
             $this->eof = false;
             $this->curIv = $this->keys['iv'];
             $this->encryptedData = '';
+            $this->lastPart = '';
             $this->stream->seek(0, $whence);
         } else {
             throw new RuntimeException('EcryptionStream only support being rewound, not arbitrary seeking.');
@@ -119,16 +120,16 @@ class EncryptionStream implements StreamInterface
     {
         if (strlen($this->encryptedData) >= $length) {
             $data = substr($this->encryptedData, 0, $length);
-            $dataLen = strlen($data);
-            $this->encryptedData = substr($this->encryptedData, $dataLen);
-            $this->position += $dataLen;
+            $this->encryptedData = substr($this->encryptedData, $length);
+            $this->position += $length;
             return $data;
         }
 
-        $lengthToRead = (int) (StreamHelper::BLOCK_SIZE * ceil(($length - strlen($this->encryptedData)) / StreamHelper::BLOCK_SIZE));
-        $newData = $this->stream->read($lengthToRead);
+        $lengthToRead = StreamHelper::calcBlocksLength($length - strlen($this->encryptedData));
+        $newData = $this->lastPart . $this->stream->read($lengthToRead);
 
-        if ($newData === '') {
+        if($newData === '') {
+            $this->encryptedData .= StreamHelper::calculateMac($this->hashCtx);
             $this->eof = true;
             $data = $this->encryptedData;
             $this->encryptedData = '';
@@ -136,30 +137,22 @@ class EncryptionStream implements StreamInterface
             return $data;
         }
 
-        $padding = OPENSSL_ZERO_PADDING;
-        if($this->stream->eof()) {
-            $padding = 0;
-        }
+        $this->lastPart = $this->stream->read(StreamHelper::BLOCK_SIZE);
+
+        $zeroPadding = $this->lastPart === '' ? 0 : OPENSSL_ZERO_PADDING;
 
         $encrypted = openssl_encrypt(
             $newData,
             'aes-256-cbc',
             $this->keys['cipherKey'],
-            OPENSSL_RAW_DATA | $padding,
+            OPENSSL_RAW_DATA | $zeroPadding,
             $this->curIv
         );
 
         $this->encryptedData .= $encrypted;
+        hash_update($this->hashCtx, $encrypted);
 
-        if($this->stream->eof()) {
-            // на самом деле мы не можем сгенерировать MAC так как для его генерации нужет
-            // ВЕСЬ зашифрованный файл, а мы его целиком в памяти не храним
-            // так что это нормально сработает, только если ВЕСЬ исходный файл попадет в один блок 
-            // при кодировании и раскодировании 
-            $this->encryptedData .= StreamHelper::generateMac($this->keys['iv'] . $this->encryptedData, $this->keys['macKey']);
-        }
-
-        $this->curIv = substr($newData, -StreamHelper::BLOCK_SIZE);
+        $this->curIv = substr($encrypted, -StreamHelper::BLOCK_SIZE);
 
         return $this->read($length);
     }

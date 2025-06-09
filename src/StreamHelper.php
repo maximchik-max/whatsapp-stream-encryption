@@ -38,8 +38,21 @@ class StreamHelper
         ];
     }
 
-    public static function generateMac(string $data, string $macKey): string
+    public static function calcBlocksLength(int $length): int
     {
-        return substr(hash_hmac('sha256', $data, $macKey, true), 0, self::MAC_SIZE);
+        return (int) (StreamHelper::BLOCK_SIZE * ceil($length / StreamHelper::BLOCK_SIZE));
+    } 
+
+    public static function calculateMac(\HashContext $hashCtx): string
+    {
+        return substr(hash_final($hashCtx, true), 0, self::MAC_SIZE);
     }
+
+    public static function initHashCtx(string $macKey, string $iv): \HashContext
+    {
+        $hashCtx = hash_init('sha256', HASH_HMAC, $macKey);
+        hash_update($hashCtx, $iv);
+        return $hashCtx;
+    }
+
 }

@@ -5,10 +5,6 @@ namespace WhatsAppStreamEncryption;
 use Psr\Http\Message\StreamInterface;
 use RuntimeException;
 
-// подписать и валидировать данные стрима при промощи HMAC мы не можем, так как для этого нужны ВСЕ данные со 
-// стрима, а одно из условий - стрим мы читаем и держим в памяти БЛОКАМИ, т.е. ВСЕ данные одномоментно НЕ доступны
-// исключение - весь файл поместился в один блок при кодировании и раскодировании
-
 class DecryptionStream implements StreamInterface
 {
     private $stream;
@@ -20,6 +16,7 @@ class DecryptionStream implements StreamInterface
     private $decryptedData;
     private $curIv;
     private $lastPart;
+    private $hashCtx;
 
     public function __construct(StreamInterface $stream, string $mediaKey, string $mediaType)
     {
@@ -32,6 +29,7 @@ class DecryptionStream implements StreamInterface
         $this->decryptedData = '';
         $this->lastPart = '';
         $this->curIv = $this->keys['iv'];
+        $this->hashCtx = StreamHelper::initHashCtx($this->keys['macKey'], $this->keys['iv']);
     }
 
     public function __toString(): string
@@ -57,10 +55,8 @@ class DecryptionStream implements StreamInterface
 
     public function getSize(): ?int
     {
-        // нельзя получить реальный размер данных до их полной расшифровки,
+        // нельзя получить реальный размер данных до их расшифровки,
         // т.к. в последнем блоке может содержаться padding,
-        // о котором можно узнать только после расшифровки последнего блока,
-        // расшифровка которого, в свою очередь, зависит от расшифровки всех предыдуших блоков
         if (!$this->eof) {
             return null;
         }
@@ -124,15 +120,13 @@ class DecryptionStream implements StreamInterface
     {
         if (strlen($this->decryptedData) >= $length) {
             $data = substr($this->decryptedData, 0, $length);
-            $dataLen = strlen($data);
-            $this->decryptedData = substr($this->decryptedData, $dataLen);
-            $this->position += $dataLen;
+            $this->decryptedData = substr($this->decryptedData, $length);
+            $this->position += $length;
             return $data;
         }
 
-        $lengthToRead = (int) (StreamHelper::BLOCK_SIZE * ceil(($length - strlen($this->decryptedData)) / StreamHelper::BLOCK_SIZE));
+        $lengthToRead = StreamHelper::calcBlocksLength($length - strlen($this->decryptedData));
         $newData = $this->lastPart . $this->stream->read($lengthToRead);
-        $this->lastPart = $this->stream->read(StreamHelper::BLOCK_SIZE);
 
         if ($newData === '') {
             $this->eof = true;
@@ -142,35 +136,35 @@ class DecryptionStream implements StreamInterface
             return $data;
         }
 
-        $padding = OPENSSL_ZERO_PADDING;
-        if($this->stream->eof()) {
-            if (strlen($this->lastPart) === StreamHelper::MAC_SIZE) {
-                $mac = $this->lastPart;
-            } else {
-                $mac = substr($newData, -StreamHelper::MAC_SIZE);
-                $newData = substr($newData, 0, -StreamHelper::MAC_SIZE); 
-            }
-            $expectedMac = StreamHelper::generateMac($this->keys['iv'] . $newData, $this->keys['macKey']);
-            // при чтении стрима по частям мы не можем его валидировать, так как для валидации нужет ВЕСЬ файл
-            // так что валидация сработает только если ВЕСЬ файл попадает в один блок стрима при кодировании и раскодировании
-            if (!hash_equals($mac, $expectedMac)) {
-                throw new RuntimeException('DecryptionStream not valid');
-            }
-            $padding = 0;
+        $remainder = strlen($newData) % StreamHelper::BLOCK_SIZE;
+        if ($remainder > 0) {
+            $this->lastPart = substr($newData,-$remainder);
+            $newData = substr($newData, 0, -$remainder);
+        } else {
+            $this->lastPart = $this->stream->read(StreamHelper::BLOCK_SIZE);
         }
 
-        if(strlen($newData) >= StreamHelper::BLOCK_SIZE) {
-            $decrypted = openssl_decrypt(
-                $newData,
-                'aes-256-cbc',
-                $this->keys['cipherKey'],
-                OPENSSL_RAW_DATA | $padding,
-                $this->curIv
-            );
-     
-            $this->decryptedData .= $decrypted;
-            $this->curIv = substr($newData, -StreamHelper::BLOCK_SIZE);
+        hash_update($this->hashCtx, $newData);
+
+        $zeroPadding = OPENSSL_ZERO_PADDING;
+        if(strlen($this->lastPart) < StreamHelper::BLOCK_SIZE) {
+            if (!hash_equals($this->lastPart, StreamHelper::calculateMac($this->hashCtx))) {
+                throw new RuntimeException('DecryptionStream not valid');
+            }
+            $this->lastPart = '';
+            $zeroPadding = 0;
         }
+
+        $decrypted = openssl_decrypt(
+            $newData,
+            'aes-256-cbc',
+            $this->keys['cipherKey'],
+            OPENSSL_RAW_DATA | $zeroPadding,
+            $this->curIv
+        );
+
+        $this->decryptedData .= $decrypted;
+        $this->curIv = substr($newData, -StreamHelper::BLOCK_SIZE);
     
         return $this->read($length);
     }
